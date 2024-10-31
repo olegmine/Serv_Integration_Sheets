@@ -18,7 +18,7 @@ async def write_sheet_data(df, spreadsheet_id, range_name):
         service = build("sheets", "v4", credentials=creds)
 
         # Заполняем пустые значения в DataFrame
-        df = df.fillna('')
+        df = df.fillna('').infer_objects(copy=False)
         logger.debug("DataFrame подготовлен для записи", rows=len(df), columns=len(df.columns))
 
         # Преобразуем DataFrame в список списков для записи в Google Sheets

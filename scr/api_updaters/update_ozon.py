@@ -63,8 +63,8 @@ async def update_prices_ozon(df: pd.DataFrame, new_price_col: str, base_old_pric
             }
 
             headers = {
-                "Client-Id": client_id,
-                "Api-Key": api_key,
+                "Client-Id": str(client_id),
+                "Api-Key": str(api_key),
                 "Content-Type": "application/json"
             }
 

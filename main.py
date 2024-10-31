@@ -12,14 +12,14 @@ from scr.api_updaters.update_ym import update_price_ym
 from scr.api_updaters.update_mm import update_prices_mm
 from scr.logger import logger
 from scr.data_fetcher import get_sheet_data, save_to_database
-from scr.data_updater import update_price ,update_and_merge_dataframes
+from scr.data_updater import update_prices ,update_and_merge_dataframes
 from scr.data_writer import write_sheet_data
 
 
 
 # Флаг для корректного завершения программы
 is_running = True
-DEBUG = False
+DEBUG = True
 
 
 class MarketplaceConfig:
@@ -93,6 +93,17 @@ async def process_ozon_data(session: aiohttp.ClientSession, config: MarketplaceC
             'api_key': config.api_ozon,
             'safe_user_name': re.sub(r'[^\w\-_]', '_', config.user_id)
         }
+        COLUMNS_FULL = {
+            'id_col': 'id',
+            'product_id_col': 'product_id',
+            'price_col': 't_price',
+            'old_price_col': 'price',
+            'old_disc_in_base_col': 'price_old',
+            'old_disc_manual_col': 'old_price',
+            'min_price_base': 'min_price_old',
+            'min_price': 'min_price',
+            'prim_col': 'prim'
+        }
         SQLITE_DB_NAME = f"databases/{db_config['safe_user_name']}_data_{db_config['safe_market_name']}.db"
 
 
@@ -116,12 +127,12 @@ async def process_ozon_data(session: aiohttp.ClientSession, config: MarketplaceC
 
         # Обновление цен
         ozon_logger.info(f"Обновление цен для {db_config['range_name']}")
-        updated_df, price_changed_df = await update_price(
-            df=df,
-            product_id_col='product_id',
-            old_disc_in_base_col='price_old',
-            old_disc_manual_col='old_price',
-            sqlite_db_name = SQLITE_DB_NAME
+        updated_df, price_changed_df = await update_prices(
+            df = df,
+            columns_dict= COLUMNS_FULL,
+            marketplace='Ozone',
+            username=config.user_id,
+            sqlite_db_name=SQLITE_DB_NAME
         )
 
 
@@ -202,6 +213,15 @@ async def process_yandex_market_data(session: aiohttp.ClientSession, config: Mar
             'business_id': config.business_id_yandex_market,
             'safe_user_name': re.sub(r'[^\w\-_]', '_', config.user_id)
         }
+        COLUMNS_FULL = {
+            'id_col': 'id',
+            'product_id_col': 'offer_id',
+            'price_col': 't_price',
+            'old_price_col': 'price',
+            'old_disc_in_base_col': 'price_old',
+            'old_disc_manual_col': 'discount_base',
+            'prim_col': 'prim'
+        }
         SQLITE_DB_NAME = f"databases/{db_config['safe_user_name']}_data_{db_config['safe_market_name']}.db"
 
 
@@ -231,12 +251,12 @@ async def process_yandex_market_data(session: aiohttp.ClientSession, config: Mar
 
             # Обновление цен
         ym_logger.info(f"Обновление цен для {db_config['range_name']}")
-        updated_df, price_changed_df = await update_price(
+        updated_df, price_changed_df = await update_prices(
             df=df,
-            product_id_col='offer_id',
-            old_disc_in_base_col='price_old',
-            old_disc_manual_col='discount_base',
-            sqlite_db_name = SQLITE_DB_NAME
+            columns_dict=COLUMNS_FULL,
+            marketplace='Yandex Market',
+            username=config.user_id,
+            sqlite_db_name=SQLITE_DB_NAME
         )
 
         # Запись обновленных данных
@@ -255,10 +275,10 @@ async def process_yandex_market_data(session: aiohttp.ClientSession, config: Mar
             )
             flag = await update_price_ym(
                 df=price_changed_df,
-                api_key=db_config['api_key'],
-                business_id=db_config['business_id'],
+                access_token=db_config['api_key'],
+                campaign_id=db_config['business_id'],
                 offer_id_col="offer_id",
-                old_price_col="price_old",
+                disc_old_col="price_old",
                 new_price_col="t_price",
                 discount_base_col="discount_base",
                 debug=DEBUG
@@ -322,6 +342,15 @@ async def process_wildberries_data(session: aiohttp.ClientSession, config: Marke
             'api_key': config.api_wildberries ,
             'safe_user_name': re.sub(r'[^\w\-_]', '_', config.user_id)
         }
+        COLUMNS_FULL = {
+            'id_col': 'id',
+            'product_id_col': 'nmID',
+            'price_col': 't_price',
+            'old_price_col': 'price',
+            'old_disc_in_base_col': 'disc_old',
+            'old_disc_manual_col': 'discount',
+            'prim_col': 'prim'
+        }
         SQLITE_DB_NAME = f"databases/{db_config['safe_user_name']}_data_{db_config['safe_market_name']}.db"
 
         try:
@@ -351,12 +380,12 @@ async def process_wildberries_data(session: aiohttp.ClientSession, config: Marke
 
             # Обновление цен
         wb_logger.info(f"Обновление цен для {db_config['range_name']}")
-        updated_df, price_changed_df = await update_price(
+        updated_df, price_changed_df = await update_prices(
             df=df,
-            product_id_col='nmID',
-            old_disc_in_base_col='disc_old',
-            old_disc_manual_col='discount',
-            sqlite_db_name = SQLITE_DB_NAME
+            columns_dict=COLUMNS_FULL,
+            marketplace='Wildberries',
+            username=config.user_id,
+            sqlite_db_name=SQLITE_DB_NAME
         )
 
         # Запись обновленных данных
@@ -378,7 +407,7 @@ async def process_wildberries_data(session: aiohttp.ClientSession, config: Marke
                 nmID_col="nmID",
                 price_col="t_price",
                 discount_col="discount",
-                old_discount_col='disc_old',
+                disc_old_col='disc_old',
                 api_key=db_config['api_key'],
                 debug=DEBUG
             )
@@ -441,6 +470,13 @@ async def process_megamarket_data(session: aiohttp.ClientSession, config: Market
             'api_token': config.api_megamarket,
             'safe_user_name': re.sub(r'[^\w\-_]', '_', config.user_id)
         }
+        COLUMNS_FULL = {
+            'id_col': 'id',
+            'product_id_col': 'seller_id',
+            'price_col': 't_price',
+            'old_price_col': 'price',
+            'prim_col': 'prim'
+        }
         SQLITE_DB_NAME = f"databases/{db_config['safe_user_name']}_data_{db_config['safe_market_name']}.db"
 
         try:
@@ -472,10 +508,12 @@ async def process_megamarket_data(session: aiohttp.ClientSession, config: Market
 
             # Обновление цен
         mm_logger.info(f"Обновление цен для {db_config['range_name']}")
-        updated_df, price_changed_df = await update_price(
+        updated_df, price_changed_df = await update_prices(
             df=df,
-            product_id_col='seller_id',
-            sqlite_db_name = SQLITE_DB_NAME
+            columns_dict=COLUMNS_FULL,
+            marketplace='MegaMarket',
+            username=config.user_id,
+            sqlite_db_name=SQLITE_DB_NAME
         )
 
         # Запись обновленных данных

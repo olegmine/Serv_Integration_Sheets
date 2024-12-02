@@ -14,6 +14,8 @@ from scr.logger import logger
 from scr.data_fetcher import get_sheet_data, save_to_database
 from scr.data_updater import update_prices ,update_and_merge_dataframes
 from scr.data_writer import write_sheet_data
+from scr.get_data.get_ozon_data import get_products_report,update_dataframe,sort_by_status_async
+import pandas as pd
 
 
 
@@ -89,10 +91,11 @@ async def process_ozon_data(session: aiohttp.ClientSession, config: MarketplaceC
             'safe_market_name': re.sub(r'[^\w\-_]', '_', config.market_name),
             'range_name': config.market_name,
             'sheet_range': config.ozon_range,
-            'client_id': config.client_id_ozon,
+            'client_id': str(config.client_id_ozon),
             'api_key': config.api_ozon,
             'safe_user_name': re.sub(r'[^\w\-_]', '_', config.user_id)
         }
+
         COLUMNS_FULL = {
             'id_col': 'id',
             'product_id_col': 'product_id',
@@ -104,92 +107,175 @@ async def process_ozon_data(session: aiohttp.ClientSession, config: MarketplaceC
             'min_price': 'min_price',
             'prim_col': 'prim'
         }
+
         SQLITE_DB_NAME = f"databases/{db_config['safe_user_name']}_data_{db_config['safe_market_name']}.db"
 
-
+        # 1. Получение данных из Google Sheets
+        df_from_sheet = None
         try:
-            # Получение данных
             ozon_logger.info(f"Получение данных из Google Sheets для {db_config['range_name']}")
-            df = await get_sheet_data(db_config['spreadsheet_id'], db_config['sheet_range'])
-        except:
-            ozon_logger.error(f"Не удалось получить данные из Гугл таблиц для пользователя {config.user_id} "
-                              f"с email {config.user_email} ")
-        try:
-            # Сохранение исходных данных
-            ozon_logger.info(f"Сохранение данных в базу для {db_config['range_name']}")
-            await save_to_database(
-                df, SQLITE_DB_NAME,
-                f'product_data_ozon_{db_config["range_name"]}',
-                primary_key_cols=['product_id']
+            df_from_sheet = await get_sheet_data(db_config['spreadsheet_id'], db_config['sheet_range'])
+        except Exception as e:
+            ozon_logger.error(
+                "Не удалось получить данные из Google Sheets",
+                extra={
+                    'user_id': config.user_id,
+                    'email': config.user_email,
+                    'error': str(e)
+                }
             )
-        except:
-            ozon_logger.error(f"Сохранение в базу данных {SQLITE_DB_NAME} не удалось ")
 
-        # Обновление цен
-        ozon_logger.info(f"Обновление цен для {db_config['range_name']}")
-        updated_df, price_changed_df = await update_prices(
-            df = df,
-            columns_dict= COLUMNS_FULL,
-            marketplace='Ozone',
-            username=config.user_id,
-            sqlite_db_name=SQLITE_DB_NAME
-        )
-
-
-        # Запись обновленных данных
-        ozon_logger.info(f"Запись обновленных данных в Google Sheets для {db_config['range_name']}")
-        await write_sheet_data(
-            updated_df,
-            db_config['spreadsheet_id'],
-            db_config['sheet_range'].replace('1', '3')
-        )
-
-        # Обновление цен через API если есть изменения
-        if not price_changed_df.empty:
-            ozon_logger.warning(f"Обновление цен через API Ozon для {db_config['range_name']}")
-            flag = await update_prices_ozon(
-                df=price_changed_df,
-                new_price_col="t_price",
-                base_old_price_col='price_old',
-                old_price_col="old_price",
-                product_id_col="product_id",
-                offer_id_col='offer_id',
-                min_price_col="min_price",
+            # 2. Получение данных из Ozon
+        report_df = pd.DataFrame()
+        try:
+            ozon_logger.info(f'Запрос данных из Ozon для пользователя {config.user_id}')
+            report_df = await get_products_report(
                 client_id=db_config['client_id'],
                 api_key=db_config['api_key'],
-                debug=DEBUG
+                marketname=config.market_name,
+                username=config.user_id,
             )
-            if flag == False :
-                df_from_error = await update_and_merge_dataframes(updated_df,
-                                                            price_changed_df,'offer_id')
+        except Exception as e:
+            ozon_logger.error(
+                "Критическая ошибка при запросе данных Ozon",
+                extra={
+                    'user_id': config.user_id,
+                    'market_name': config.market_name,
+                    'range': config.ozon_range,
+                    'error': str(e)
+                }
+            )
+
+            # 3. Обработка данных
+        if df_from_sheet is not None and not report_df.empty:
+            try:
+                # Объединение данных
+                df_united = await update_dataframe(df_from_sheet, report_df, config.user_id, config.market_name)
+                df = await sort_by_status_async(df_united)
+
+                # Сохранение в базу данных
+                try:
+                    await save_to_database(
+                        df,
+                        SQLITE_DB_NAME,
+                        f'product_data_ozon_{db_config["range_name"]}',
+                        primary_key_cols=['product_id']
+                    )
+                except Exception as e:
+                    ozon_logger.error(f"Ошибка сохранения в базу данных: {str(e)}")
+
+                    # Обновление цен
+                updated_df, price_changed_df = await update_prices(
+                    df=df,
+                    columns_dict=COLUMNS_FULL,
+                    marketplace='Ozone',
+                    username=config.user_id,
+                    sqlite_db_name=SQLITE_DB_NAME
+                )
+
+                # Запись обновленных данных
                 await write_sheet_data(
-                    df_from_error,
+                    updated_df,
                     db_config['spreadsheet_id'],
-                    db_config['sheet_range'].replace('1', '3'))
+                    db_config['sheet_range'].replace('1', '3')
+                )
 
-        ozon_logger.info(f"Обработка завершена успешно для {db_config['range_name']}")
+                # Обновление цен через API
+                if not price_changed_df.empty:
+                    flag = await update_prices_ozon(
+                        df=price_changed_df,
+                        new_price_col="t_price",
+                        base_old_price_col='price_old',
+                        old_price_col="old_price",
+                        product_id_col="product_id",
+                        offer_id_col='offer_id',
+                        min_price_col="min_price",
+                        client_id=db_config['client_id'],
+                        api_key=db_config['api_key'],
+                        debug=DEBUG
+                    )
+
+                    if not flag:
+                        df_from_error = await update_and_merge_dataframes(
+                            updated_df,
+                            price_changed_df,
+                            'offer_id'
+                        )
+                        await write_sheet_data(
+                            df_from_error,
+                            db_config['spreadsheet_id'],
+                            db_config['sheet_range'].replace('1', '3')
+                        )
+
+                return {
+                    'status': 'success',
+                    'marketplace': 'Ozon',
+                    'rows_processed': len(df),
+                    'rows_updated': len(price_changed_df)
+                }
+
+            except Exception as e:
+                ozon_logger.error(
+                    "Ошибка при обработке данных",
+                    extra={
+                        'user_id': config.user_id,
+                        'market_name': config.market_name,
+                        'error': str(e)
+                    }
+                )
+                raise
+
+        elif not report_df.empty:
+            # Если нет данных в Google Sheets, но есть данные из Ozon
+            ozon_logger.warning(
+                f"Таблица Google пуста для клиента {config.user_id}, записываю данные из личного кабинета"
+            )
+            # Создаем копию DataFrame
+            df_to_write = report_df.copy()
+
+            # Сортируем с сохранением описательной строки в начале
+            df_to_write = await sort_by_status_async(df_to_write)
+
+            # Получаем названия колонок
+            column_names = pd.DataFrame([df_to_write.columns.tolist()], columns=df_to_write.columns)
+
+            # Сначала добавляем названия колонок, затем данные
+            df_to_write = pd.concat([column_names, df_to_write], axis=0, ignore_index=True)
+
+
+
+            await write_sheet_data(
+                df_to_write,
+                db_config['spreadsheet_id'],
+                db_config['sheet_range']
+            )
         return {
-            'status': 'success',
-            'marketplace': 'Ozon',
-            'rows_processed': len(df),
-            'rows_updated': len(price_changed_df)
-        }
-
-    except Exception as e:
-        error_details = {
-            'user_id': config.user_id,
-            'market_name': config.market_name,
-            'range': config.ozon_range,
-            'error': str(e)
-        }
-        ozon_logger.error("Критическая ошибка при обновлении данных Ozon", **error_details)
-
+                'status': 'success',
+                'marketplace': 'Ozon',
+                'rows_processed': len(report_df),
+                'rows_updated': 0
+            }
 
         return {
             'status': 'error',
             'marketplace': 'Ozon',
+            'error': 'Нет данных для обработки',
+            'details': {
+                'has_sheet_data': df_from_sheet is not None,
+                'has_ozon_data': not report_df.empty
+            }
+        }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'marketplace': 'Ozon',
             'error': str(e),
-            'details': error_details
+            'details': {
+                'user_id': config.user_id,
+                'market_name': config.market_name,
+                'range': config.ozon_range
+            }
         }
 
 
@@ -669,23 +755,23 @@ async def process_marketplace_data(config: MarketplaceConfig):
                         result = await process_ozon_data(session, config)
                         results.append(result)
 
-                    # Обработка данных Яндекс.Маркет
-                    if config.has_yandex_market_config():
-                        logger.info(f"🎁 Обработка данных Яндекс.Маркет для пользователя {user_info}")
-                        result = await process_yandex_market_data(session, config)
-                        results.append(result)
-
-                    # Обработка данных Wildberries
-                    if config.has_wildberries_config():
-                        logger.info(f"🛍️ Обработка данных Wildberries для пользователя {user_info}")
-                        result = await process_wildberries_data(session, config)
-                        results.append(result)
-
-                    # Обработка данных Megamarket
-                    if config.has_megamarket_config():
-                        logger.info(f"🏪 Обработка данных Megamarket для пользователя {user_info}")
-                        result = await process_megamarket_data(session, config)
-                        results.append(result)
+                    # # Обработка данных Яндекс.Маркет
+                    # if config.has_yandex_market_config():
+                    #     logger.info(f"🎁 Обработка данных Яндекс.Маркет для пользователя {user_info}")
+                    #     result = await process_yandex_market_data(session, config)
+                    #     results.append(result)
+                    #
+                    # # Обработка данных Wildberries
+                    # if config.has_wildberries_config():
+                    #     logger.info(f"🛍️ Обработка данных Wildberries для пользователя {user_info}")
+                    #     result = await process_wildberries_data(session, config)
+                    #     results.append(result)
+                    #
+                    # # Обработка данных Megamarket
+                    # if config.has_megamarket_config():
+                    #     logger.info(f"🏪 Обработка данных Megamarket для пользователя {user_info}")
+                    #     result = await process_megamarket_data(session, config)
+                    #     results.append(result)
 
                     logger.info(f"✅ Завершена обработка данных для пользователя {user_info}")
                     logger.debug(f"Результаты обработки: {json.dumps(results, indent=2)}")

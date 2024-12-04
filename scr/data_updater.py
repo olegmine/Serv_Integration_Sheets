@@ -7,7 +7,7 @@ from datetime import datetime
 import numpy as np
 from .logger import logger
 
-
+pd.set_option('future.no_silent_downcasting', True)
 async def update_prices(df, columns_dict, sqlite_db_name='SQLITE_DB_NAME',
                         price_change_log_table='price_change_log', marketplace=None, username=None):
     """
@@ -208,7 +208,7 @@ async def update_prices(df, columns_dict, sqlite_db_name='SQLITE_DB_NAME',
                     changes.append(change_info)
 
             except ValueError:
-                logger.warning("invalid_value",
+                logger.info("invalid_value",
                              message="Некорректный формат данных",
                              importance="high",
                              id=row[columns_dict['id_col']],

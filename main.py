@@ -14,8 +14,12 @@ from scr.logger import logger
 from scr.data_fetcher import get_sheet_data, save_to_database
 from scr.data_updater import update_prices ,update_and_merge_dataframes
 from scr.data_writer import write_sheet_data
-from scr.get_data.get_ozon_data import get_products_report,update_dataframe,sort_by_status_async
+from scr.get_data.get_ozon_data import get_products_report,update_dataframe_ozon,sort_by_status_async
 import pandas as pd
+from scr.get_data.get_wb_data.get_first_wb_datas import get_wb_data
+from scr.get_data.get_wb_data.get_wb_stocks import get_stocks
+from scr.get_data.get_wb_data.wb_update_functions import update_stocks_data,update_dataframe_wb,clean_numeric_column
+from scr.get_data.get_wb_data.images_wb import add_image_formulas
 
 
 
@@ -150,7 +154,7 @@ async def process_ozon_data(session: aiohttp.ClientSession, config: MarketplaceC
         if df_from_sheet is not None and not report_df.empty:
             try:
                 # Объединение данных
-                df_united = await update_dataframe(df_from_sheet, report_df, config.user_id, config.market_name)
+                df_united = await update_dataframe_ozon(df_from_sheet, report_df, config.user_id, config.market_name)
                 df = await sort_by_status_async(df_united)
 
                 # Сохранение в базу данных
@@ -440,84 +444,195 @@ async def process_wildberries_data(session: aiohttp.ClientSession, config: Marke
         SQLITE_DB_NAME = f"databases/{db_config['safe_user_name']}_data_{db_config['safe_market_name']}.db"
 
         try:
-            # Получение данных
+            # Получение данных гугл
             wb_logger.info(f"Получение данных из Google Sheets для {db_config['range_name']}")
-            df = await get_sheet_data(db_config['spreadsheet_id'], db_config['sheet_range'])
+            df_from_sheets = None
+            df_from_sheets = await get_sheet_data(db_config['spreadsheet_id'], db_config['sheet_range'])
 
-            if df is None or df.empty:
-                raise ValueError(f"Не удалось получить данные из Google Sheets для {db_config['range_name']}")
+            try:
+                df_from_sheets = await clean_numeric_column(old_df=df_from_sheets,
+                                                               column_name='nmID',
+                                                               username=config.user_id,
+                                                               marketname=config.market_name,
+                                                               logger=logger)
+            except Exception as e:
+                wb_logger.error(f"Не удалось удаление пустых и невалидных строк для пользователя {config.user_id}", error=str(e))
+
+
+
         except Exception as e:
+            df_from_sheets = None
             wb_logger.error(f"Ошибка получения данных из Google Sheets для пользователя {config.user_id} "
                             f"с email {config.user_email}", error=str(e))
-            raise
 
+
+
+        # Получение данных ВБ
         try:
-            # Сохранение исходных данных
-            wb_logger.info(f"Сохранение данных в базу для {db_config['range_name']}")
-            await save_to_database(
-                df,
-                SQLITE_DB_NAME,
-                f"product_data_wb_{db_config['safe_market_name']}",
-                primary_key_cols=['nmID']
-            )
+            first_df = await get_wb_data(api_key = db_config['api_key'],
+                                         limit = 200,
+                                         username=config.user_id,
+                                         marketname=config.market_name)
         except Exception as e:
-            wb_logger.error(f"Ошибка сохранения в базу данных {SQLITE_DB_NAME}", error=str(e))
-            raise
-
-            # Обновление цен
-        wb_logger.info(f"Обновление цен для {db_config['range_name']}")
-        updated_df, price_changed_df = await update_prices(
-            df=df,
-            columns_dict=COLUMNS_FULL,
-            marketplace='Wildberries',
-            username=config.user_id,
-            sqlite_db_name=SQLITE_DB_NAME
-        )
-
-        # Запись обновленных данных
-        wb_logger.info(f"Запись обновленных данных в Google Sheets для {db_config['range_name']}")
-        await write_sheet_data(
-            updated_df,
-            db_config['spreadsheet_id'],
-            db_config['sheet_range'].replace('1', '3')
-        )
-
-        # Обновление цен через API если есть изменения
-        if not price_changed_df.empty:
-            wb_logger.warning(
-                f"Обновление цен через API Wildberries для {db_config['range_name']}",
-                rows_to_update=len(price_changed_df)
+            wb_logger.error(
+                "Критическая ошибка при запросе данных WB",
+                extra={
+                    'user_id': config.user_id,
+                    'market_name': config.market_name,
+                    'range': config.wildberries_range,
+                    'error': str(e)
+                }
             )
-            flag = await update_prices_wb(
-                df=price_changed_df,
-                nmID_col="nmID",
-                price_col="t_price",
-                discount_col="discount",
-                disc_old_col='disc_old',
-                api_key=db_config['api_key'],
-                debug=DEBUG
+            first_df = None
+        # Получение информации об остатках товаров
+        try:
+            stocks_df = await get_stocks(api_key=db_config['api_key'],
+                                         marketname=config.market_name,
+                                         username=config.user_id)
+        except Exception as e:
+            wb_logger.error(
+                "Критическая ошибка при запросе данных WB",
+                extra={
+                    'user_id': config.user_id,
+                    'market_name': config.market_name,
+                    'range': config.wildberries_range,
+                    'error': str(e)
+                }
             )
-            if flag == False :
-                df_from_error = await update_and_merge_dataframes(updated_df,
-                                                            price_changed_df,'nmID')
-                await write_sheet_data(
-                    df_from_error,
-                    db_config['spreadsheet_id'],
-                    db_config['sheet_range'].replace('1', '3')
+            stocks_df = None
+        if df_from_sheets is not None and first_df is not None:
+            g_data = True
+            upddated_df_without_stocks = await update_dataframe_wb(df_from_sheets,
+                                                                  first_df,
+                                                                  config.user_id,
+                                                                  config.market_name)
+            if stocks_df is not None:
+                upddated_df_final = await update_stocks_data(upddated_df_without_stocks,
+                                                             stocks_df,
+                                                             logger)
+            else:
+                upddated_df_final = upddated_df_without_stocks.copy()
+                wb_logger.warning(f"Ошибка обновления остатков для WB пользователь {config.user_id},диапазон{config.wildberries_range}")
+
+        elif df_from_sheets is None and first_df is not None:
+            g_data = False
+            upddated_df_without_stocks = first_df.copy()
+
+            if stocks_df is not None:
+                upddated_df_final = await update_stocks_data(upddated_df_without_stocks,
+                                                             stocks_df,
+                                                             logger)
+            else:
+                upddated_df_final = upddated_df_without_stocks.copy()
+                wb_logger.warning(f"Ошибка обновления остатков для WB пользователь {config.user_id},диапазон{config.wildberries_range}")
+        else:
+            upddated_df_final = None
+            wb_logger.error(f"Не удалось получить ни Данные гугл таблиц,ни данные гугл")
+
+
+        if upddated_df_final is not None:
+
+            try:
+                # Сохранение исходных данных
+                wb_logger.info(f"Сохранение данных в базу для {db_config['range_name']}")
+                await save_to_database(
+                    upddated_df_final,
+                    SQLITE_DB_NAME,
+                    f"product_data_wb_{db_config['safe_market_name']}",
+                    primary_key_cols=['nmID']
                 )
 
-        wb_logger.info(
-            f"Обработка завершена успешно для {db_config['range_name']}",
-            rows_processed=len(df),
-            rows_updated=len(price_changed_df)
-        )
+            except Exception as e:
+                wb_logger.error(f"Ошибка сохранения в базу данных {SQLITE_DB_NAME}", error=str(e))
+                raise
 
+
+        if upddated_df_final is not None and g_data == True:
+            # Обновление цен
+            wb_logger.info(f"Обновление цен для {db_config['range_name']}")
+            updated_df, price_changed_df = await update_prices(
+                df=upddated_df_final,
+                columns_dict=COLUMNS_FULL,
+                marketplace='Wildberries',
+                username=config.user_id,
+                sqlite_db_name=SQLITE_DB_NAME
+            )
+            updated_df = await add_image_formulas(updated_df)
+            # Запись обновленных данных
+            wb_logger.info(f"Запись обновленных данных в Google Sheets для {db_config['range_name']}")
+            await write_sheet_data(
+                updated_df,
+                db_config['spreadsheet_id'],
+                db_config['sheet_range'].replace('1', '3')
+            )
+            # Обновление цен через API если есть изменения
+            if not price_changed_df.empty:
+                wb_logger.warning(
+                    f"Обновление цен через API Wildberries для {db_config['range_name']}",
+                    rows_to_update=len(price_changed_df)
+                )
+                flag = await update_prices_wb(
+                    df=price_changed_df,
+                    nmID_col="nmID",
+                    price_col="t_price",
+                    discount_col="discount",
+                    disc_old_col='disc_old',
+                    api_key=db_config['api_key'],
+                    debug=DEBUG
+                )
+                if flag == False :
+                    df_from_error = await update_and_merge_dataframes(updated_df,
+                                                                price_changed_df,'nmID')
+                    await write_sheet_data(
+                        df_from_error,
+                        db_config['spreadsheet_id'],
+                        db_config['sheet_range'].replace('1', '3')
+                    )
+
+            wb_logger.info(
+                f"Обработка завершена успешно для {db_config['range_name']}",
+                rows_processed=len(upddated_df_final),
+                rows_updated=len(price_changed_df)
+            )
+
+            return {
+                'status': 'success',
+                'marketplace': 'Wildberries',
+                'rows_processed': len(upddated_df_final),
+                'rows_updated': len(price_changed_df)
+            }
+
+        elif upddated_df_final is not None and g_data == False:
+            # Если нет данных в Google Sheets, но есть данные из WB
+            wb_logger.warning(
+                f"Таблица Google пуста для клиента {config.user_id}, записываю данные из личного кабинета"
+            )
+            # Создаем копию DataFrame
+            df_to_write = upddated_df_final.copy()
+
+
+            # Получаем названия колонок
+            column_names = pd.DataFrame([df_to_write.columns.tolist()], columns=df_to_write.columns)
+
+
+
+            df_to_write = await add_image_formulas(df_to_write)
+
+            # Сначала добавляем названия колонок, затем данные
+            df_to_write = pd.concat([column_names, df_to_write], axis=0, ignore_index=True)
+
+            await write_sheet_data(
+                df_to_write,
+                db_config['spreadsheet_id'],
+                db_config['sheet_range']
+            )
         return {
             'status': 'success',
-            'marketplace': 'Wildberries',
-            'rows_processed': len(df),
-            'rows_updated': len(price_changed_df)
+            'marketplace': 'WB',
+            'rows_processed': len(upddated_df_final),
+            'rows_updated': 0
         }
+
 
     except Exception as e:
         error_details = {
@@ -760,12 +875,12 @@ async def process_marketplace_data(config: MarketplaceConfig):
                     #     logger.info(f"🎁 Обработка данных Яндекс.Маркет для пользователя {user_info}")
                     #     result = await process_yandex_market_data(session, config)
                     #     results.append(result)
-                    #
-                    # # Обработка данных Wildberries
-                    # if config.has_wildberries_config():
-                    #     logger.info(f"🛍️ Обработка данных Wildberries для пользователя {user_info}")
-                    #     result = await process_wildberries_data(session, config)
-                    #     results.append(result)
+
+                    # Обработка данных Wildberries
+                    if config.has_wildberries_config():
+                        logger.info(f"🛍️ Обработка данных Wildberries для пользователя {user_info}")
+                        result = await process_wildberries_data(session, config)
+                        results.append(result)
                     #
                     # # Обработка данных Megamarket
                     # if config.has_megamarket_config():

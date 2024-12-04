@@ -137,9 +137,7 @@ def process_dataframe(df, market_name=None, username=None):
 
         # Базовые поля
         new_df['Client-Id'] = [market_name] * len(df)
-        new_df['offer_id'] = df['Артикул'].fillna('').astype(str).apply(
-            lambda x: x[1:] if len(x) > 1 else x
-        )
+        new_df['offer_id'] = df['Артикул'].fillna('').astype(str)
         new_df['product_id'] = df['FBO OZON SKU ID']
         new_df['id'] = df['Наименование товара']
         new_df['link'] = 'https://www.ozon.ru/product/' + df['FBO OZON SKU ID'].fillna('').astype(str)
@@ -561,7 +559,7 @@ async def sort_by_status_async(df):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, sort_df)
 
-async def update_dataframe(df1: pd.DataFrame, df2: pd.DataFrame, user_name: str, market_name: str) -> pd.DataFrame:
+async def update_dataframe_ozon(df1: pd.DataFrame, df2: pd.DataFrame, user_name: str, market_name: str) -> pd.DataFrame:
     """
     Асинхронно обновляет первый DataFrame данными из второго DataFrame на основе product_id,
     пропуская первую описательную строку.

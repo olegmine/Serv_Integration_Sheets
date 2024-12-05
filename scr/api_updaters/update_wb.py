@@ -96,7 +96,7 @@ if __name__ == "__main__":
         "disc_old": [45]
     })
 
-    api_key = "eyJhbGciOiJFUzI1NiIsImtpZCI6IjIwMjQxMDAxdjEiLCJ0eXAiOiJKV1QifQ.eyJlbnQiOjEsImV4cCI6MTc0NDA2ODI0MSwiaWQiOiIwMTkyNjZiOC1kM2ZjLTcwNDItYjc0ZC03NTgwZGEyZDZiNTgiLCJpaWQiOjMyMTQxMzQ4LCJvaWQiOjIwNTA1NywicyI6MjYsInNpZCI6ImQ4NGEzNmU5LWM5NzUtNDkwMi04NDA3LWU3OTg1OTM5ZTM3MyIsInQiOmZhbHNlLCJ1aWQiOjMyMTQxMzQ4fQ.OWY2mt__EBdKZzQFcn4Gi3oSCcB_qMvw69vCN5KO5MZY-ELC7sZiV8159yTnXA7317kSDx0BUXY8-q3TKCMIlA"  # Замените на ваш реальный API ключ
+    api_key = "test"  # Замените на ваш реальный API ключ
 
     logger.info("Начало процесса обновления цен")
     asyncio.run(update_prices_wb(df, "nmID", "price", "discount", "disc_old", api_key, debug=False))

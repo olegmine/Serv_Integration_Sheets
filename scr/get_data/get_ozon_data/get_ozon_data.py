@@ -666,7 +666,7 @@ if __name__ == "__main__":
         try:
             df = await get_products_report(
                 client_id="1336645",
-                api_key="e6640a3f-d177-4b08-9487-59be840f8a8c",
+                api_key="test",
                 marketname="ozon",
                 username="test_user",
                 # language="RU"

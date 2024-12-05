@@ -14,7 +14,7 @@ from scr.logger import logger
 from scr.data_fetcher import get_sheet_data, save_to_database
 from scr.data_updater import update_prices ,update_and_merge_dataframes
 from scr.data_writer import write_sheet_data
-from scr.get_data.get_ozon_data import get_products_report,update_dataframe_ozon,sort_by_status_async
+from scr.get_data.get_ozon_data.get_ozon_data import get_products_report,update_dataframe_ozon,sort_by_status_async
 import pandas as pd
 from scr.get_data.get_wb_data.get_first_wb_datas import get_wb_data
 from scr.get_data.get_wb_data.get_wb_stocks import get_stocks
@@ -871,10 +871,10 @@ async def process_marketplace_data(config: MarketplaceConfig):
                         results.append(result)
 
                     # # Обработка данных Яндекс.Маркет
-                    # if config.has_yandex_market_config():
-                    #     logger.info(f"🎁 Обработка данных Яндекс.Маркет для пользователя {user_info}")
-                    #     result = await process_yandex_market_data(session, config)
-                    #     results.append(result)
+                    if config.has_yandex_market_config():
+                        logger.info(f"🎁 Обработка данных Яндекс.Маркет для пользователя {user_info}")
+                        result = await process_yandex_market_data(session, config)
+                        results.append(result)
 
                     # Обработка данных Wildberries
                     if config.has_wildberries_config():
@@ -882,11 +882,11 @@ async def process_marketplace_data(config: MarketplaceConfig):
                         result = await process_wildberries_data(session, config)
                         results.append(result)
                     #
-                    # # Обработка данных Megamarket
-                    # if config.has_megamarket_config():
-                    #     logger.info(f"🏪 Обработка данных Megamarket для пользователя {user_info}")
-                    #     result = await process_megamarket_data(session, config)
-                    #     results.append(result)
+                    # Обработка данных Megamarket
+                    if config.has_megamarket_config():
+                        logger.info(f"🏪 Обработка данных Megamarket для пользователя {user_info}")
+                        result = await process_megamarket_data(session, config)
+                        results.append(result)
 
                     logger.info(f"✅ Завершена обработка данных для пользователя {user_info}")
                     logger.debug(f"Результаты обработки: {json.dumps(results, indent=2)}")

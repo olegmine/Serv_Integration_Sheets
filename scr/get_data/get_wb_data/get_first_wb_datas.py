@@ -82,7 +82,7 @@ def convert_wb_data_to_df(response_data: Dict) -> pd.DataFrame:
         return pd.DataFrame()
 
     processed_data = []
-    print(response_data)
+    # print(response_data)
 
     for item in response_data['data']['listGoods']:
         size_data = item['sizes'][0] if item['sizes'] else {}

@@ -13,7 +13,7 @@ class GoogleServiceAuthManager:
 
     def __init__(self):
         self.base_dir = Path(__file__).parent.parent
-        self.config_dir = self.base_dir / "access"
+        self.config_dir = self.base_dir / 'scr'/"access"
         self.service_account_path = self.config_dir / "service-account.json"
 
         # Создаём директорию если её нет

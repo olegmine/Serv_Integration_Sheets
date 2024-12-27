@@ -16,12 +16,15 @@ from scr.data_updater import update_prices ,update_and_merge_dataframes
 from scr.data_writer import write_sheet_data
 from scr.get_data.get_ozon_data.get_ozon_data import get_products_report,update_dataframe_ozon,sort_by_status_async
 import pandas as pd
+import warnings
 from scr.get_data.get_wb_data.get_first_wb_datas import get_wb_data
 from scr.get_data.get_wb_data.get_wb_stocks import get_stocks
 from scr.get_data.get_wb_data.wb_update_functions import update_stocks_data,update_dataframe_wb,clean_numeric_column
 from scr.get_data.get_wb_data.images_wb import add_image_formulas
+from scr.get_data.get_ym_data.ym_datas import get_df_ym
+from scr.get_data.get_ym_data.ym_datas import update_dataframe_ym
 
-
+warnings.filterwarnings('ignore', category=FutureWarning, module='pandas')
 
 # Флаг для корректного завершения программы
 is_running = True
@@ -129,7 +132,7 @@ async def process_ozon_data(session: aiohttp.ClientSession, config: MarketplaceC
                 }
             )
 
-            # 2. Получение данных из Ozon
+        # 2. Получение данных из Ozon
         report_df = pd.DataFrame()
         try:
             ozon_logger.info(f'Запрос данных из Ozon для пользователя {config.user_id}')
@@ -149,13 +152,21 @@ async def process_ozon_data(session: aiohttp.ClientSession, config: MarketplaceC
                     'error': str(e)
                 }
             )
-
+        update_flag_ozon = False
+        working_df = None
             # 3. Обработка данных
-        if df_from_sheet is not None and not report_df.empty:
+        if df_from_sheet is not None and report_df is not None:
             try:
+                # Проверка и приведение типов данных
+                df_from_sheet['product_id'] = df_from_sheet['product_id'].astype(str)
+                report_df['product_id'] = report_df['product_id'].astype(str)
+
                 # Объединение данных
                 df_united = await update_dataframe_ozon(df_from_sheet, report_df, config.user_id, config.market_name)
                 df = await sort_by_status_async(df_united)
+
+                working_df = df_united.copy()
+                update_flag_ozon = True
 
                 # Сохранение в базу данных
                 try:
@@ -167,67 +178,71 @@ async def process_ozon_data(session: aiohttp.ClientSession, config: MarketplaceC
                     )
                 except Exception as e:
                     ozon_logger.error(f"Ошибка сохранения в базу данных: {str(e)}")
+            except Exception as e:
+                ozon_logger.error(f"Ошибка обьеденения данных {str(e)}")
 
-                    # Обновление цен
-                updated_df, price_changed_df = await update_prices(
-                    df=df,
-                    columns_dict=COLUMNS_FULL,
-                    marketplace='Ozone',
-                    username=config.user_id,
-                    sqlite_db_name=SQLITE_DB_NAME
+
+        if update_flag_ozon is True and working_df is not None:
+            # Обновление цен
+            updated_df, price_changed_df = await update_prices(
+                df=working_df,
+                columns_dict=COLUMNS_FULL,
+                marketplace='Ozone',
+                username=config.user_id,
+                sqlite_db_name=SQLITE_DB_NAME
+            )
+
+            # Запись обновленных данных
+            await write_sheet_data(
+                updated_df,
+                db_config['spreadsheet_id'],
+                db_config['sheet_range'].replace('1', '3')
+            )
+
+            # Обновление цен через API
+            if price_changed_df is not None and 'change_applied' in price_changed_df.columns:
+                ozon_logger.warning(
+                    f"Обновление цен через API Ozon для {db_config['range_name']}",
+                    rows_to_update=len(price_changed_df))
+                if DEBUG is True:
+                    price_changed_df.to_csv(
+                        f'Ozon_{db_config['safe_user_name']}_{db_config['safe_market_name']}.csv')
+
+                flag = await update_prices_ozon(
+                    df=price_changed_df,
+                    new_price_col="t_price",
+                    base_old_price_col='price_old',
+                    old_price_col="old_price",
+                    product_id_col="product_id",
+                    offer_id_col='offer_id',
+                    min_price_col="min_price",
+                    client_id=db_config['client_id'],
+                    api_key=db_config['api_key'],
+                    debug=DEBUG
                 )
 
-                # Запись обновленных данных
-                await write_sheet_data(
-                    updated_df,
-                    db_config['spreadsheet_id'],
-                    db_config['sheet_range'].replace('1', '3')
-                )
-
-                # Обновление цен через API
-                if not price_changed_df.empty:
-                    flag = await update_prices_ozon(
-                        df=price_changed_df,
-                        new_price_col="t_price",
-                        base_old_price_col='price_old',
-                        old_price_col="old_price",
-                        product_id_col="product_id",
-                        offer_id_col='offer_id',
-                        min_price_col="min_price",
-                        client_id=db_config['client_id'],
-                        api_key=db_config['api_key'],
-                        debug=DEBUG
+                if not flag:
+                    df_from_error = await update_and_merge_dataframes(
+                        updated_df,
+                        price_changed_df,
+                        'offer_id'
+                    )
+                    await write_sheet_data(
+                        df_from_error,
+                        db_config['spreadsheet_id'],
+                        db_config['sheet_range'].replace('1', '3')
                     )
 
-                    if not flag:
-                        df_from_error = await update_and_merge_dataframes(
-                            updated_df,
-                            price_changed_df,
-                            'offer_id'
-                        )
-                        await write_sheet_data(
-                            df_from_error,
-                            db_config['spreadsheet_id'],
-                            db_config['sheet_range'].replace('1', '3')
-                        )
+            return {
+                'status': 'success',
+                'marketplace': 'Ozon',
+                'rows_processed': len(df),
+                'rows_updated': len(price_changed_df) if price_changed_df is not None else 0
+            }
 
-                return {
-                    'status': 'success',
-                    'marketplace': 'Ozon',
-                    'rows_processed': len(df),
-                    'rows_updated': len(price_changed_df)
-                }
 
-            except Exception as e:
-                ozon_logger.error(
-                    "Ошибка при обработке данных",
-                    extra={
-                        'user_id': config.user_id,
-                        'market_name': config.market_name,
-                        'error': str(e)
-                    }
-                )
-                raise
+
+
 
         elif not report_df.empty:
             # Если нет данных в Google Sheets, но есть данные из Ozon
@@ -314,85 +329,123 @@ async def process_yandex_market_data(session: aiohttp.ClientSession, config: Mar
         }
         SQLITE_DB_NAME = f"databases/{db_config['safe_user_name']}_data_{db_config['safe_market_name']}.db"
 
-
         try:
-            # Получение данныхym_logger.info(f"Получение данных из Google Sheets для {db_config['range_name']}")
-            df = await get_sheet_data(db_config['spreadsheet_id'], db_config['sheet_range'])
+            df_from_ym,ym_flag = await get_df_ym(api_key=db_config['api_key'],
+                                         business_id=db_config['business_id'],
+                                         client_id=config.market_name,
+                                         username=config.user_id,
+                                         marketname=config.market_name,
+                                         save_to_file=False
+                                         )
 
-            if df is None or df.empty:
-                raise ValueError(f"Не удалось получить данные из Google Sheets для {db_config['range_name']}")
         except Exception as e:
+            df_from_ym = None
+            ym_logger.error(f"Ошибка получения данных от Яндекса для пользователя {config.user_id} "
+                            f"с email {config.user_email}", error=str(e))
+        try:
+            # Получение данных
+            ym_logger.info(f"Получение данных из Google Sheets для {db_config['range_name']}")
+            df_from_gs = await get_sheet_data(db_config['spreadsheet_id'], db_config['sheet_range'])
+
+
+        except Exception as e:
+            df_from_gs = None
             ym_logger.error(f"Ошибка получения данных из Google Sheets для пользователя {config.user_id} "
                             f"с email {config.user_email}", error=str(e))
-            raise
 
-        try:
-            # Сохранение исходных данных
-            ym_logger.info(f"Сохранение данных в базу для {db_config['range_name']}")
-            await save_to_database(
-                df,
-                SQLITE_DB_NAME,
-                f"product_data_ym_{db_config['safe_market_name']}",
-                primary_key_cols=['offer_id']
-            )
-        except Exception as e:
-            ym_logger.error(f"Ошибка сохранения в базу данных {SQLITE_DB_NAME}", error=str(e))
-            raise
+        if df_from_gs is not None and df_from_ym is None:
+            try:
+                # Сохранение исходных данных
+                ym_logger.info(f"Сохранение данных в базу для {db_config['range_name']}")
+                await save_to_database(
+                    df_from_gs,
+                    SQLITE_DB_NAME,
+                    f"product_data_ym_{db_config['safe_market_name']}",
+                    primary_key_cols=['offer_id']
+                )
+            except Exception as e:
+                ym_logger.error(f"Ошибка сохранения в базу данных {SQLITE_DB_NAME}", error=str(e))
+                raise
 
+        if df_from_gs is not None and df_from_ym is not None:
+            df_sync = await update_dataframe_ym(df_from_gs,df_from_ym,config.user_id,config.market_name)
             # Обновление цен
-        ym_logger.info(f"Обновление цен для {db_config['range_name']}")
-        updated_df, price_changed_df = await update_prices(
-            df=df,
-            columns_dict=COLUMNS_FULL,
-            marketplace='Yandex Market',
-            username=config.user_id,
-            sqlite_db_name=SQLITE_DB_NAME
-        )
+            ym_logger.info(f"Обновление цен для {db_config['range_name']}")
+            updated_df, price_changed_df = await update_prices(
+                df=df_sync,
+                columns_dict=COLUMNS_FULL,
+                marketplace='Yandex Market',
+                username=config.user_id,
+                sqlite_db_name=SQLITE_DB_NAME
+            )
 
-        # Запись обновленных данных
-        ym_logger.info(f"Запись обновленных данных в Google Sheets для {db_config['range_name']}")
-        await write_sheet_data(
-            updated_df,
-            db_config['spreadsheet_id'],
-            db_config['sheet_range'].replace('1', '3')
-        )
+            # Запись обновленных данных
+            ym_logger.info(f"Запись обновленных данных в Google Sheets для {db_config['range_name']}")
+            await write_sheet_data(
+                updated_df,
+                db_config['spreadsheet_id'],
+                db_config['sheet_range'].replace('1', '3')
+            )
 
-        # Обновление цен через API если есть изменения
-        if not price_changed_df.empty:
+            # Обновление цен через API если есть изменения
+            if price_changed_df is not None and 'change_applied' in price_changed_df.columns:
+                if DEBUG is True:
+                    price_changed_df.to_csv(
+                        f'ЯндексМаркет_{db_config['safe_user_name']}_{db_config['safe_market_name']}.csv')
+                ym_logger.warning(
+                    f"Обновление цен через API Яндекс.Маркет для {db_config['range_name']}",
+                    rows_to_update=len(price_changed_df)
+                )
+                flag = await update_price_ym(
+                    df=price_changed_df,
+                    access_token=db_config['api_key'],
+                    campaign_id=db_config['business_id'],
+                    offer_id_col="offer_id",
+                    disc_old_col="price_old",
+                    new_price_col="t_price",
+                    discount_base_col="discount_base",
+                    debug=DEBUG
+                )
+                if flag == False :
+                    df_from_error = await update_and_merge_dataframes(updated_df,
+                                                                price_changed_df,'offer_id')
+                    await write_sheet_data(
+                        df_from_error,
+                        db_config['spreadsheet_id'],
+                        db_config['sheet_range'].replace('1', '3'))
+
+            ym_logger.info(
+                f"Обработка завершена успешно для {db_config['range_name']}",
+                rows_processed=len(df_sync),
+                rows_updated=len(price_changed_df) if price_changed_df is not None else 0
+            )
+
+            return {
+                'status': 'success',
+                'marketplace': 'YandexMarket',
+                'rows_processed': len(df_sync),
+                'rows_updated': len(price_changed_df) if price_changed_df is not None else 0
+            }
+        elif df_from_ym is not None and df_from_gs is None:
+            # Если нет данных в Google Sheets, но есть данные из WB
             ym_logger.warning(
-                f"Обновление цен через API Яндекс.Маркет для {db_config['range_name']}",
-                rows_to_update=len(price_changed_df)
+                f"Таблица Google пуста для клиента {config.user_id}, записываю данные из личного кабинета"
             )
-            flag = await update_price_ym(
-                df=price_changed_df,
-                access_token=db_config['api_key'],
-                campaign_id=db_config['business_id'],
-                offer_id_col="offer_id",
-                disc_old_col="price_old",
-                new_price_col="t_price",
-                discount_base_col="discount_base",
-                debug=DEBUG
+            # Создаем копию DataFrame
+            df_to_write = df_from_ym.copy()
+
+            # Получаем названия колонок
+            column_names = pd.DataFrame([df_to_write.columns.tolist()], columns=df_to_write.columns)
+
+            # Сначала добавляем названия колонок, затем данные
+            df_to_write = pd.concat([column_names, df_to_write], axis=0, ignore_index=True)
+
+            await write_sheet_data(
+                df_to_write,
+                db_config['spreadsheet_id'],
+                db_config['sheet_range']
             )
-            if flag == False :
-                df_from_error = await update_and_merge_dataframes(updated_df,
-                                                            price_changed_df,'offer_id')
-                await write_sheet_data(
-                    df_from_error,
-                    db_config['spreadsheet_id'],
-                    db_config['sheet_range'].replace('1', '3'))
 
-        ym_logger.info(
-            f"Обработка завершена успешно для {db_config['range_name']}",
-            rows_processed=len(df),
-            rows_updated=len(price_changed_df)
-        )
-
-        return {
-            'status': 'success',
-            'marketplace': 'YandexMarket',
-            'rows_processed': len(df),
-            'rows_updated': len(price_changed_df)
-        }
 
     except Exception as e:
         error_details = {
@@ -502,6 +555,8 @@ async def process_wildberries_data(session: aiohttp.ClientSession, config: Marke
             stocks_df = None
         if df_from_sheets is not None and first_df is not None:
             g_data = True
+            df_from_sheets['nmID'] = df_from_sheets['nmID'].astype(str)
+            first_df['nmID'] = first_df['nmID'].astype(str)
             upddated_df_without_stocks = await update_dataframe_wb(df_from_sheets,
                                                                   first_df,
                                                                   config.user_id,
@@ -566,7 +621,10 @@ async def process_wildberries_data(session: aiohttp.ClientSession, config: Marke
                 db_config['sheet_range'].replace('1', '3')
             )
             # Обновление цен через API если есть изменения
-            if not price_changed_df.empty:
+            if price_changed_df is not None and 'change_applied' in price_changed_df.columns:
+                if DEBUG is True:
+                    price_changed_df.to_csv(
+                        f'Wildberries_{db_config['safe_user_name']}_{db_config['safe_market_name']}.csv')
                 wb_logger.warning(
                     f"Обновление цен через API Wildberries для {db_config['range_name']}",
                     rows_to_update=len(price_changed_df)
@@ -592,14 +650,14 @@ async def process_wildberries_data(session: aiohttp.ClientSession, config: Marke
             wb_logger.info(
                 f"Обработка завершена успешно для {db_config['range_name']}",
                 rows_processed=len(upddated_df_final),
-                rows_updated=len(price_changed_df)
+                rows_updated=len(price_changed_df) if price_changed_df is not None else 0
             )
 
             return {
                 'status': 'success',
                 'marketplace': 'Wildberries',
                 'rows_processed': len(upddated_df_final),
-                'rows_updated': len(price_changed_df)
+                'rows_updated': len(price_changed_df) if price_changed_df is not None else 0
             }
 
         elif upddated_df_final is not None and g_data == False:
@@ -726,7 +784,9 @@ async def process_megamarket_data(session: aiohttp.ClientSession, config: Market
         )
 
         # Обновление цен через API если есть изменения
-        if not price_changed_df.empty:
+        if  price_changed_df is not None and 'change_applied' in price_changed_df.columns:
+            if DEBUG is True:
+                price_changed_df.to_csv(f'MegaMarket_{db_config['safe_user_name']}_{db_config['safe_market_name']}.csv')
             mm_logger.warning(
                 f"Обновление цен через API Megamarket для {db_config['range_name']}",
                 rows_to_update=len(price_changed_df)
@@ -751,14 +811,14 @@ async def process_megamarket_data(session: aiohttp.ClientSession, config: Market
         mm_logger.info(
             f"Обработка завершена успешно для {db_config['range_name']}",
             rows_processed=len(df),
-            rows_updated=len(price_changed_df)
+            rows_updated=len(price_changed_df) if price_changed_df is not None else 0
         )
 
         return {
             'status': 'success',
             'marketplace': 'Megamarket',
             'rows_processed': len(df),
-            'rows_updated': len(price_changed_df)
+            'rows_updated': len(price_changed_df) if price_changed_df is not None else 0
         }
 
     except Exception as e:

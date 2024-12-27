@@ -170,6 +170,7 @@ def transform_wb_data_sync(df: pd.DataFrame, client_id: str = "") -> pd.DataFram
         'disc_old': 'Скидка в системе',
         't_price': 'Цена для применения',
         'discount': 'Скидка в процентах',
+        'Flag': 'Тумблер применения цены Указать (True/TRUE/+) для обработки строки',
         'prim': 'Примечание(заполняется программой)'
     }])
 
@@ -183,6 +184,7 @@ def transform_wb_data_sync(df: pd.DataFrame, client_id: str = "") -> pd.DataFram
         'disc_old': df['discount'].values,
         't_price': df['price'].values,
         'discount': df['discount'].values,
+        'Flag': False,
         'prim': ['Нет значения'] * len(df)
     })
 

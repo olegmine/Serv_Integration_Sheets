@@ -115,7 +115,8 @@ def format_error_message(error_data: dict) -> str:
 """
 
 async def main():
-    API_KEY = "your_api_key"  # Замените на ваш API ключ
+    API_KEY = ""  # Замените на ваш API ключ
+
     MARKET_NAME = "wildberries"
     USERNAME = "your_username"
 
@@ -125,7 +126,7 @@ async def main():
             marketname=MARKET_NAME,
             username=USERNAME
         )
-        df.to_excel('market.xlsx')
+        df.to_csv('market.csv')
         return df
 
     except Exception as e:

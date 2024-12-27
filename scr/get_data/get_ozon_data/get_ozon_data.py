@@ -83,7 +83,7 @@ def process_dataframe(df, market_name=None, username=None):
     # Константы
     REQUIRED_COLUMNS = {
         'Артикул': 'offer_id',
-        'FBO OZON SKU ID': 'product_id',
+        'SKU': 'product_id',
         'Статус товара' : 'status',
         'Текущая цена с учетом скидки, ₽': 'price',
         'Цена до скидки (перечеркнутая цена), ₽': 'price_old',
@@ -92,7 +92,7 @@ def process_dataframe(df, market_name=None, username=None):
         'Рыночная цена, ₽': 'market_price',
         'Рейтинг': 'rating'
     }
-    df.to_csv('from.csv')
+    # df.to_csv('from.csv')
 
     def log_operation(message, level='info', extra_data=None):
         """Вспомогательная функция для логирования"""
@@ -138,9 +138,9 @@ def process_dataframe(df, market_name=None, username=None):
         # Базовые поля
         new_df['Client-Id'] = [market_name] * len(df)
         new_df['offer_id'] = df['Артикул'].fillna('').astype(str)
-        new_df['product_id'] = df['FBO OZON SKU ID']
+        new_df['product_id'] = df['SKU']
         new_df['id'] = df['Наименование товара']
-        new_df['link'] = 'https://www.ozon.ru/product/' + df['FBO OZON SKU ID'].fillna('').astype(str)
+        new_df['link'] = 'https://www.ozon.ru/product/' + df['SKU'].fillna('').astype(str)
         new_df['status'] = df['Статус товара']
         new_df['stock'] = safe_float_convert(df['Доступно к продаже по схеме FBS, шт.'], default_value=0)
         new_df['rating'] = safe_float_convert(df['Рейтинг'], default_value=0)
@@ -156,7 +156,7 @@ def process_dataframe(df, market_name=None, username=None):
 
         # Информационные поля
 
-
+        new_df['Flag'] = False
         new_df['prim'] = 'Нет значения'
 
         # Словарь с описаниями колонок
@@ -176,6 +176,7 @@ def process_dataframe(df, market_name=None, username=None):
             'min_price': 'Минимальная цена для участия в акциях',
             'stock': 'Доступно к продаже (FBS)',
             'rating': 'Рейтинг товара',
+            'Flag': 'Тумблер применения цены Указать (True/TRUE/+) для обработки строки',
             'prim': 'Примечание'
         }
 
@@ -559,127 +560,134 @@ async def sort_by_status_async(df):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, sort_df)
 
-async def update_dataframe_ozon(df1: pd.DataFrame, df2: pd.DataFrame, user_name: str, market_name: str) -> pd.DataFrame:
+async def update_dataframe_ozon(df1, df2, user_name, market_name):
+    return await asyncio.to_thread(
+        sync_update_dataframe_ozon,
+        df1, df2, user_name, market_name
+    )
+
+
+def sync_update_dataframe_ozon(df1: pd.DataFrame, df2: pd.DataFrame, user_name: str, market_name: str) -> pd.DataFrame:
     """
-    Асинхронно обновляет первый DataFrame данными из второго DataFrame на основе product_id,
+    Обновляет первый DataFrame данными из второго DataFrame на основе offer_id,
     пропуская первую описательную строку.
     """
+    # Сохраняем описательную строку из первого DataFrame
+    header_row = df1.iloc[0:1].copy()
 
-    def update_df():
-        # Сохраняем описательную строку из первого DataFrame
-        header_row = df1.iloc[0:1].copy()
+    # Копируем DataFrame'ы без первой строки
+    df1_updated = df1.iloc[1:].copy()
+    df2_updated = df2.iloc[1:].copy()
 
-        # Копируем DataFrame'ы без первой строки
-        df1_updated = df1.iloc[1:].copy()
-        df2_updated = df2.iloc[1:].copy()
+    # Определяем колонки
+    required_cols = ['product_id', 'offer_id', 'id', 'link', 'status', 'stock', 'rating', 'market_price', 'price', 'price_old', 'min_price_old']
+    optional_cols = ['Client-Id', 't_price', 'old_price', 'min_price','Flag']
 
-        # Определяем колонки
-        required_cols = ['price', 'price_old', 'id', 'link', 'status','market_price', 'stock', 'rating']
-        optional_cols = ['Client-Id', 'offer_id', 'product_id', 't_price', 'old_price', 'min_price_old', 'min_price']
+    # Проверяем наличие обязательных колонок
+    missing_required_cols = [col for col in required_cols if col not in df2_updated.columns]
+    if missing_required_cols:
+        raise ValueError(f"Отсутствуют обязательные колонки в df2: {', '.join(missing_required_cols)}")
 
-        # Проверяем наличие обязательных колонок
-        missing_required_cols = [col for col in required_cols if col not in df2_updated.columns]
-        if missing_required_cols:
-            raise ValueError(f"Отсутствуют обязательные колонки в df2: {', '.join(missing_required_cols)}")
+    # Получаем списки product_id
+    df1_products = set(df1_updated['product_id'].astype(str))
+    df2_products = set(df2_updated['product_id'].astype(str))
+    new_products = df2_products - df1_products
 
-        # Получаем списки product_id
-        df1_products = set(df1_updated['product_id'].astype(str))
-        df2_products = set(df2_updated['product_id'].astype(str))
-        new_products = df2_products - df1_products
+    # Добавляем метку времени для новых записей
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    df2_updated['prim'] = df2_updated.apply(
+        lambda row: f"Добавлен автоматически {current_time}"
+        if str(row['product_id']) in new_products
+        else row.get('prim', ''),
+        axis=1
+    )
 
-        # Добавляем метку времени для новых записей
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        df2_updated['prim'] = df2_updated.apply(
-            lambda row: f"Добавлен автоматически {current_time}"
-            if str(row['product_id']) in new_products
-            else row.get('prim', ''),
-            axis=1
-        )
+    # Разделяем df2 на новые и существующие записи
+    df2_new = df2_updated[df2_updated['product_id'].astype(str).isin(new_products)]
+    df2_existing = df2_updated[~df2_updated['product_id'].astype(str).isin(new_products)]
 
-        # Разделяем df2 на новые и существующие записи
-        df2_new = df2_updated[df2_updated['product_id'].astype(str).isin(new_products)]
-        df2_existing = df2_updated[~df2_updated['product_id'].astype(str).isin(new_products)]
+    # Обновляем существующие записи
+    merged_existing = df1_updated.merge(
+        df2_existing,
+        on='product_id',
+        how='left',
+        suffixes=('', '_new')
+    )
 
-        # Обновляем существующие записи
-        merged_existing = df1_updated.merge(
-            df2_existing,
-            on='product_id',
-            how='left',
-            suffixes=('', '_new')
-        )
+    # Обновляем значения в существующих записях
+    for col in required_cols:
+        if col != 'product_id' and f'{col}_new' in merged_existing.columns:
+            merged_existing[col] = merged_existing[f'{col}_new'].fillna(merged_existing[col])
 
-        # Обновляем значения в существующих записях
-        for col in required_cols:
-            # Обязательные колонки обновляются всегда (кроме product_id)
-            if col != 'product_id' and f'{col}_new' in merged_existing.columns:
-                merged_existing[col] = merged_existing[f'{col}_new'].fillna(merged_existing[col])
-
-        for col in optional_cols:
-            # Опциональные колонки обновляются только если текущее значение None или "Нет значения"
-            if f'{col}_new' in merged_existing.columns:
-                merged_existing[col] = merged_existing.apply(
-                    lambda row: row[f'{col}_new']
-                    if pd.notna(row[f'{col}_new']) and (
+    for col in optional_cols:
+        if f'{col}_new' in merged_existing.columns:
+            merged_existing[col] = merged_existing.apply(
+                lambda row: row[f'{col}_new']
+                if pd.notna(row[f'{col}_new']) and (
                         pd.isna(row[col])
                         or row[col] == ''
                         or row[col] == 'Нет значения'
-                    )
-                    else row[col],
-                    axis=1
+                        or row[col] == 'Нет Значения'
+                        or row[col] == '0'
                 )
+                else row[col],
+                axis=1
+            )
 
-        # Удаляем временные колонки
-        merged_existing = merged_existing.drop(columns=[col for col in merged_existing.columns if col.endswith('_new')])
+    # Удаляем временные колонки
+    merged_existing = merged_existing.drop(columns=[col for col in merged_existing.columns if col.endswith('_new')])
 
-        # Добавляем новые записи
-        if not df2_new.empty:
-            # Убеждаемся, что все необходимые колонки присутствуют
-            for col in required_cols + optional_cols:
-                if col not in df2_new.columns:
-                    df2_new[col] = ''
-
-            # Объединяем существующие и новые записи
-            final_df = pd.concat([merged_existing, df2_new], ignore_index=True)
-        else:
-            final_df = merged_existing
+    # Добавляем новые записи
+    if not df2_new.empty:
+        for col in required_cols + optional_cols:
+            if col not in df2_new.columns:
+                df2_new[col] = ''
+        final_df = pd.concat([merged_existing, df2_new], ignore_index=True)
+    else:
+        final_df = merged_existing
 
         # Заполняем пустые значения
-        final_df = final_df.fillna('')
+    final_df = final_df.fillna('')
 
-        # Добавляем описательную строку обратно в начало DataFrame
-        final_df = pd.concat([header_row, final_df], ignore_index=True)
+    # Добавляем описательную строку обратно в начало DataFrame
+    final_df = pd.concat([header_row, final_df], ignore_index=True)
 
-        logger.info(
-            f"Обновление завершено. Исходные строки: {len(df1_updated)}, "  
-            f"Новые строки: {len(df2_new)}, "  
-            f"Итого строк: {len(final_df)}"
-        )
+    logger.info(
+        f"Обновление завершено. Исходные строки: {len(df1_updated)}, "
+        f"Новые строки: {len(df2_new)}, "
+        f"Итого строк: {len(final_df)}"
+    )
 
-        return final_df
-
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, update_df)
+    return final_df
 
 # Пример использования
-if __name__ == "__main__":
-    async def example():
-        try:
-            df = await get_products_report(
-                client_id="1336645",
-                api_key="test",
-                marketname="ozon",
-                username="test_user",
-                # language="RU"
-            )
-            df_fin = await sort_by_status_async(df)
-            df_fin.to_csv('sell.csv')
-            print(f"Получен DataFrame размером: {df.shape}")
-            print("\nПервые несколько строк:")
-            print(df.head())
-            print("\nСтолбцы DataFrame:")
-            print(df.columns.tolist())
-        except Exception as e:
-            print(f"Ошибка: {e}")
+# if __name__ == "__main__":
+#     async def example():
+#         # try:
+#             # df = await get_products_report(
+#             #     client_id="1336645",
+#             #     api_key="test",
+#             #     marketname="ozon",
+#             #     username="test_user",
+#             #     # language="RU"
+#             # )
+#             # df_fin = await sort_by_status_async(df)
+#             # df_fin.to_csv('sell.csv')
+#         #     print(f"Получен DataFrame размером: {df.shape}")
+#         #     print("\nПервые несколько строк:")
+#         #     print(df.head())
+#         #     print("\nСтолбцы DataFrame:")
+#         #     print(df.columns.tolist())
+#         # except Exception as e:
+#         #     print(f"Ошибка: {e}")
+#
+#
+#     asyncio.run(example())
 
 
-    asyncio.run(example())
+# df_sheet = pd.read_csv('sheet_Ozon_Tech_PC_Components.csv')
+# df_rep = pd.read_csv('reportTech_PC_Components.csv')
+# df_res = asyncio.run(update_dataframe_ozon(df_sheet,df_rep,'user','market'))
+# df_res.to_csv('united.csv')
+# df_sorted = asyncio.run(sort_by_status_async(df_res))
+# df_sorted.to_csv('sorted.csv')

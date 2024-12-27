@@ -1,4 +1,5 @@
 import aiohttp
+import asyncio
 import pandas as pd
 import json
 import os,sys
@@ -98,19 +99,31 @@ async def update_prices_ozon(df: pd.DataFrame, new_price_col: str, base_old_pric
                         return False
 
 # Пример использования
-df = pd.DataFrame({
-    "offer_id": ['Moroccanoil-100ml'],
-    "old_price": ['hhh'],
-    "new_price": [2670],
-    'product_id': [1706152388],
-    'disc_old_col':["l"]
+price_changed_df = pd.DataFrame({
+    "offer_id": ['LF-CoatOversize-black-buttons-50'],
+    "old_price": [17890],
+    "t_price": [12490],
+    'product_id': [1759891287],
+    'disc_old_col':["l"],
+    'min_price':[11300]
 })
 
 client_id = "1336645"
-api_key = "test"
+api_key = "e6640a3f-d177-4b08-9487-59be840f8a8c"
 
 # Для отправки реальных запросов
 # asyncio.run(update_prices_ozon(df, "new_price", "old_price", "product_id", 'offer_id', "min_price", client_id, api_key))
 
 # Для тестового режима (режим отладки)
-# asyncio.run(update_prices_ozon(df, "new_price", 'disc_old_col',"old_price", "product_id", 'offer_id', "min_price", client_id, api_key, debug=True))
+# asyncio.run(update_prices_ozon(
+#                         df=price_changed_df,
+#                         new_price_col="t_price",
+#                         base_old_price_col='price_old',
+#                         old_price_col="old_price",
+#                         product_id_col="product_id",
+#                         offer_id_col='offer_id',
+#                         min_price_col="min_price",
+#                         client_id=client_id,
+#                         api_key=api_key,
+#                         debug=False
+#                     ))

@@ -5,237 +5,291 @@ from pathlib import Path
 import sqlite3
 from datetime import datetime
 import numpy as np
+from typing import Dict, List, Tuple, Optional, Any, Union
 from .logger import logger
 
 pd.set_option('future.no_silent_downcasting', True)
-async def update_prices(df, columns_dict, sqlite_db_name='SQLITE_DB_NAME',
-                        price_change_log_table='price_change_log', marketplace=None, username=None):
-    """
-    Определяет необходимость обновления цен, скидок и минимальных цен, записывает информацию
-    об изменениях в таблицу price_change_log и обновляет значения в DataFrame
 
-    Parameters:
-    -----------
-    df : pandas.DataFrame
-        Исходный DataFrame с данными
-    columns_dict : dict
-        Словарь с названиями колонок:
-        {
-            'id_col': 'id',
-            'product_id_col': 'product_id',
-            'price_col': 'price',
-            'old_price_col': 'old_price',
-            'prim_col': 'prim',
-            'old_disc_in_base_col': 'old_disc_in_base',
-            'old_disc_manual_col': 'old_disc_manual',
-            'min_price_base': 'min_price_base',
-            'min_price': 'min_price'
-        }
+
+async def update_prices(
+        df: pd.DataFrame,
+        columns_dict: Dict[str, str],
+        sqlite_db_name: str = 'SQLITE_DB_NAME',
+        price_change_log_table: str = 'price_change_log',
+        marketplace: Optional[str] = None,
+        username: Optional[str] = None
+) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     """
+    Обновляет цены, скидки и минимальные цены в датафрейме, логирует изменения в БД
+
+    Args:
+        df: Исходный датафрейм с данными
+        columns_dict: Словарь соответствия названий колонок
+        sqlite_db_name: Имя файла базы данных SQLite
+        price_change_log_table: Имя таблицы для логирования изменений
+        marketplace: Название торговой площадки
+        username: Имя пользователя
+
+    Returns:
+        Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+            - Обновленный датафрейм
+            - Датафрейм с информацией об изменениях (None если изменений не было)
+    """
+
+    def validate_price(value: Any) -> Optional[float]:
+        """Проверяет и преобразует значение цены"""
+        try:
+            return float(value) if value != 'Нет Значения' else None
+        except (ValueError, TypeError):
+            return None
+
+    def check_price_change(old_price: Optional[float], new_price: Optional[float]) -> Tuple[bool, str]:
+        """Проверяет допустимость изменения цены"""
+        if old_price is None or new_price is None:
+            return False, "Отсутствует старая или новая цена"
+        if old_price == 0 and new_price != 0:
+            return True, f"Старая цена была 0, обновлено на {new_price}"
+        if new_price == 0:
+            return False, "Новая цена стала 0, требуется проверка"
+        if abs(new_price - old_price) / old_price > 0.5:
+            return False, f"Изменение цены с {old_price} на {new_price} превышает 50%, цена не изменена"
+        return True, ""
+
+    def validate_discounts_and_prices(row: pd.Series) -> List[str]:
+        """Проверяет корректность скидок и минимальных цен"""
+        errors = []
+
+        # Проверка скидок
+        if all(key in columns_dict for key in ['old_disc_in_base_col', 'old_disc_manual_col']):
+            old_disc_in_base = validate_price(row[columns_dict['old_disc_in_base_col']])
+            old_disc_manual = validate_price(row[columns_dict['old_disc_manual_col']])
+
+            if old_disc_in_base is None:
+                errors.append("Некорректное значение базовой скидки")
+            if old_disc_manual is None:
+                errors.append("Некорректное значение ручной скидки")
+
+                # Проверка минимальных цен
+        if all(key in columns_dict for key in ['min_price_base', 'min_price']):
+            min_price_base = validate_price(row[columns_dict['min_price_base']])
+            min_price_new = validate_price(row[columns_dict['min_price']])
+
+            if min_price_base is None:
+                errors.append("Некорректное значение базовой минимальной цены")
+            if min_price_new is None:
+                errors.append("Некорректное значение новой минимальной цены")
+
+        return errors
+
+    def create_log_entry(
+            timestamp: str,
+            row: pd.Series,
+            old_price: Optional[float] = None,
+            new_price: Optional[float] = None,
+            old_discount: Optional[float] = None,
+            new_discount: Optional[float] = None,
+            old_min_price: Optional[float] = None,
+            new_min_price: Optional[float] = None,
+            prim: str = "",
+            change_applied: int = 0
+    ) -> Tuple:
+        """Создает запись для лога изменений"""
+        return (
+            timestamp,
+            row[columns_dict['id_col']],
+            row[columns_dict['product_id_col']],
+            old_price, new_price,
+            old_discount, new_discount,
+            old_min_price, new_min_price,
+            prim, change_applied
+        )
+
+        # Подготовка датафрейма
 
     df = df.replace('', np.nan).fillna(value='Нет Значения')
-    df = df.iloc[1:]  # Пропускаем первую строку (заголовки)
-    changes = []
+    df = df.iloc[1:]  # Пропускаем первую строку
+    changes = []  # Список для хранения информации об изменениях
     updated_df = df.copy()
 
     try:
-        conn = sqlite3.connect(sqlite_db_name)
-        c = conn.cursor()
+        with sqlite3.connect(sqlite_db_name) as conn:
+            c = conn.cursor()
 
-        c.execute(f'''CREATE TABLE IF NOT EXISTS '{price_change_log_table}'  
-                     (timestamp TEXT, id TEXT, product_id TEXT, old_price REAL, new_price REAL,   
-                     old_discount REAL, new_discount REAL, old_min_price REAL, new_min_price REAL,   
-                     prim TEXT, change_applied INTEGER)''')
+            # Создание таблицы для логирования если не существует
+            c.execute(f'''CREATE TABLE IF NOT EXISTS '{price_change_log_table}'  
+                         (timestamp TEXT, id TEXT, product_id TEXT, old_price REAL, new_price REAL,  
+                         old_discount REAL, new_discount REAL, old_min_price REAL, new_min_price REAL,  
+                         prim TEXT, change_applied INTEGER)''')
 
-        for _, row in df.iterrows():
-            change_info = None
-            price_changed = False
-            discount_changed = False
-            min_price_changed = False
+            for idx, row in df.iterrows():
+                try:
+                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
 
-            try:
-                old_price = float(row[columns_dict['old_price_col']]) if row[columns_dict['old_price_col']] != 'Нет Значения' else None
-                new_price = float(row[columns_dict['price_col']]) if row[columns_dict['price_col']] != 'Нет Значения' else None
+                    # Проверка флага обработки
+                    process_row = str(row.get('Flag', '')).upper() in ['TRUE', '+']
 
-                # Проверка наличия цен
-                if old_price is None or new_price is None:
-                    prim = "Отсутствует старая или новая цена"
-                    updated_df.at[_, columns_dict['prim_col']] = prim
-                    logger.info("missing_price",
-                              message=prim,
-                              importance="high",
-                              id=row[columns_dict['id_col']],
-                              product_id=row[columns_dict['product_id_col']],
-                              marketplace=marketplace,
-                              username=username)
-                    c.execute(
-                        f"INSERT INTO '{price_change_log_table}' (timestamp, id, product_id, old_price, new_price, old_discount, new_discount, old_min_price, new_min_price, prim, change_applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                         row[columns_dict['id_col']],
-                         row[columns_dict['product_id_col']],
-                         old_price, new_price, None, None, None, None, prim, 0))
-                    continue
+                    if not process_row:
+                        # Если строка не должна обрабатываться
+                        updated_prim = f"Пропущено {timestamp}"
+                        updated_df.at[idx, columns_dict['prim_col']] = updated_prim
 
-                # Проверка нулевой старой цены
-                if old_price == 0:
-                    if new_price != 0:
-                        updated_df.at[_, columns_dict['old_price_col']] = new_price
-                        prim = f"Старая цена была 0, обновлено на {new_price}"
-                        updated_df.at[_, columns_dict['prim_col']] = prim
+                        c.execute(
+                            f"INSERT INTO '{price_change_log_table}' VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            create_log_entry(timestamp, row, prim=updated_prim)
+                        )
+                        continue
+
+                        # Валидация цен
+                    old_price = validate_price(row[columns_dict['old_price_col']])
+                    new_price = validate_price(row[columns_dict['price_col']])
+
+                    # Проверка ошибок валидации
+                    validation_errors = validate_discounts_and_prices(row)
+                    if validation_errors:
+                        error_message = f"{'; '.join(validation_errors)} ({timestamp})"
+                        updated_df.at[idx, columns_dict['prim_col']] = error_message
+
+                        logger.info("validation_failed",
+                                    message=error_message,
+                                    importance="high",
+                                    id=row[columns_dict['id_col']],
+                                    product_id=row[columns_dict['product_id_col']],
+                                    marketplace=marketplace,
+                                    username=username)
+
+                        c.execute(
+                            f"INSERT INTO '{price_change_log_table}' VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            create_log_entry(timestamp, row, prim=error_message)
+                        )
+                        continue
+
+                        # Проверка изменения цены
+                    is_valid_change, message = check_price_change(old_price, new_price)
+                    if not is_valid_change:
+                        updated_message = f"{message} ({timestamp})"
+                        updated_df.at[idx, columns_dict['prim_col']] = updated_message
+
+                        logger.info("price_validation_failed",
+                                    message=message,
+                                    importance="high",
+                                    id=row[columns_dict['id_col']],
+                                    product_id=row[columns_dict['product_id_col']],
+                                    marketplace=marketplace,
+                                    username=username)
+
+                        c.execute(
+                            f"INSERT INTO '{price_change_log_table}' VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            create_log_entry(timestamp, row, old_price, new_price, prim=updated_message)
+                        )
+                        continue
+
+                        # Обработка изменений
+                    change_info = None
+                    price_changed = discount_changed = min_price_changed = False
+
+                    # Проверка изменения цены
+                    if new_price != old_price:
+                        updated_df.at[idx, columns_dict['old_price_col']] = new_price
                         price_changed = True
                         change_info = row.to_dict()
-                        change_info[columns_dict['old_price_col']] = new_price
-                        change_info[columns_dict['prim_col']] = prim
-                        logger.info("price_updated_from_zero",
-                                  message="Цена обновлена с нуля",
-                                  id=row[columns_dict['id_col']],
-                                  product_id=row[columns_dict['product_id_col']],
-                                  new_price=new_price,
-                                  marketplace=marketplace,
-                                  username=username)
+                        change_info[columns_dict['price_col']] = new_price
+
+                        # Проверка изменения скидок
+                    if all(key in columns_dict for key in ['old_disc_in_base_col', 'old_disc_manual_col']):
+                        old_disc_in_base = validate_price(row[columns_dict['old_disc_in_base_col']])
+                        old_disc_manual = validate_price(row[columns_dict['old_disc_manual_col']])
+
+                        if old_disc_in_base != old_disc_manual:
+                            updated_df.at[idx, columns_dict['old_disc_in_base_col']] = old_disc_manual
+                            discount_changed = True
+                            if not change_info:
+                                change_info = row.to_dict()
+                            change_info.update({
+                                columns_dict['old_disc_in_base_col']: old_disc_manual,
+                                'old_discount': old_disc_in_base,
+                                'new_discount': old_disc_manual
+                            })
+
+                            # Проверка изменения минимальных цен
+                    if all(key in columns_dict for key in ['min_price_base', 'min_price']):
+                        min_price_base = validate_price(row[columns_dict['min_price_base']])
+                        min_price_new = validate_price(row[columns_dict['min_price']])
+
+                        if min_price_base != min_price_new:
+                            updated_df.at[idx, columns_dict['min_price_base']] = min_price_new
+                            min_price_changed = True
+                            if not change_info:
+                                change_info = row.to_dict()
+                            change_info.update({
+                                columns_dict['min_price_base']: min_price_new,
+                                'old_min_price': min_price_base,
+                                'new_min_price': min_price_new
+                            })
+
+                            # Формирование итогового примечания при наличии изменений
+                    if any([price_changed, discount_changed, min_price_changed]):
+                        prim_parts = []
+                        if price_changed:
+                            prim_parts.append(f"цена с {old_price} на {new_price}")
+                        if discount_changed:
+                            prim_parts.append(f"скидка с {old_disc_in_base} на {old_disc_manual}")
+                        if min_price_changed:
+                            prim_parts.append(f"минимальная цена с {min_price_base} на {min_price_new}")
+
+                        prim = f"Изменены: {' и '.join(prim_parts)} ({timestamp})"
+                        updated_df.at[idx, columns_dict['prim_col']] = prim
+
                         c.execute(
-                            f"INSERT INTO '{price_change_log_table}' (timestamp, id, product_id, old_price, new_price, old_discount, new_discount, old_min_price, new_min_price, prim, change_applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                             row[columns_dict['id_col']],
-                             row[columns_dict['product_id_col']],
-                             old_price, new_price, None, None, None, None, prim, 1))
-                    continue
+                            f"INSERT INTO '{price_change_log_table}' VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            create_log_entry(
+                                timestamp, row,
+                                old_price if price_changed else None,
+                                new_price if price_changed else None,
+                                old_disc_in_base if discount_changed else None,
+                                old_disc_manual if discount_changed else None,
+                                min_price_base if min_price_changed else None,
+                                min_price_new if min_price_changed else None,
+                                prim, 1
+                            )
+                        )
 
-                # Проверка нулевой новой цены
-                if new_price == 0:
-                    prim = "Новая цена стала 0, требуется проверка"
-                    updated_df.at[_, columns_dict['prim_col']] = prim
-                    logger.warning("new_price_zero",
-                                 message=prim,
-                                 importance="high",
-                                 id=row[columns_dict['id_col']],
-                                 product_id=row[columns_dict['product_id_col']],
-                                 marketplace=marketplace,
-                                 username=username)
-                    c.execute(
-                        f"INSERT INTO '{price_change_log_table}' (timestamp, id, product_id, old_price, new_price, old_discount, new_discount, old_min_price, new_min_price, prim, change_applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                         row[columns_dict['id_col']],
-                         row[columns_dict['product_id_col']],
-                         old_price, new_price, None, None, None, None, prim, 0))
-                    continue
+                        change_info['change_applied'] = True
+                        change_info[columns_dict['prim_col']] = prim
+                        changes.append(change_info)
 
-                # Проверка изменения цены более чем на 50%
-                if abs(new_price - old_price) / old_price > 0.5:
-                    prim = f"Изменение цены с {old_price} на {new_price} превышает 50%, цена не изменена"
-                    updated_df.at[_, columns_dict['prim_col']] = prim
-                    logger.info("price_change_exceeds_limit",
-                              message="Изменение цены превышает допустимый предел",
-                              importance="high",
-                              id=row[columns_dict['id_col']],
-                              product_id=row[columns_dict['product_id_col']],
-                              old_price=old_price,
-                              new_price=new_price,
-                              marketplace=marketplace,
-                              username=username)
-                    c.execute(
-                        f"INSERT INTO '{price_change_log_table}' (timestamp, id, product_id, old_price, new_price, old_discount, new_discount, old_min_price, new_min_price, prim, change_applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                         row[columns_dict['id_col']],
-                         row[columns_dict['product_id_col']],
-                         old_price, new_price, None, None, None, None, prim, 0))
-                    continue
+                        # Изменение Flag на False после успешной обработки
+                        updated_df.at[idx, 'Flag'] = False
 
-                # Обновление цены при прохождении всех проверок
-                if new_price != old_price:
-                    updated_df.at[_, columns_dict['old_price_col']] = new_price
-                    price_changed = True
-                    if not change_info:
-                        change_info = row.to_dict()
-                    change_info[columns_dict['price_col']] = new_price
+                except ValueError as e:
+                    error_message = f"Некорректный формат данных ({timestamp})"
+                    updated_df.at[idx, columns_dict['prim_col']] = error_message
 
-                # Обработка скидок
-                if 'old_disc_in_base_col' in columns_dict and 'old_disc_manual_col' in columns_dict:
-                    old_disc_in_base = float(row[columns_dict['old_disc_in_base_col']]) if row[columns_dict['old_disc_in_base_col']] != 'Нет Значения' else 0
-                    old_disc_manual = float(row[columns_dict['old_disc_manual_col']]) if row[columns_dict['old_disc_manual_col']] != 'Нет Значения' else 0
-
-                    if old_disc_in_base != old_disc_manual:
-                        updated_df.at[_, columns_dict['old_disc_in_base_col']] = old_disc_manual
-                        discount_changed = True
-                        if not change_info:
-                            change_info = row.to_dict()
-                        change_info[columns_dict['old_disc_in_base_col']] = old_disc_manual
-                        change_info['old_discount'] = old_disc_in_base
-                        change_info['new_discount'] = old_disc_manual
-
-                # Обработка минимальных цен
-                if 'min_price_base' in columns_dict and 'min_price' in columns_dict:
-                    min_price_base = float(row[columns_dict['min_price_base']]) if row[columns_dict['min_price_base']] != 'Нет Значения' else 0
-                    min_price_new = float(row[columns_dict['min_price']]) if row[columns_dict['min_price']] != 'Нет Значения' else 0
-
-                    if min_price_base != min_price_new:
-                        updated_df.at[_, columns_dict['min_price_base']] = min_price_new
-                        min_price_changed = True
-                        if not change_info:
-                            change_info = row.to_dict()
-                        change_info[columns_dict['min_price_base']] = min_price_new
-                        change_info['old_min_price'] = min_price_base
-                        change_info['new_min_price'] = min_price_new
-
-                # Формирование итогового примечания
-                if price_changed or discount_changed or min_price_changed:
-                    prim_parts = []
-                    if price_changed:
-                        prim_parts.append(f"цена с {old_price} на {new_price}")
-                    if discount_changed:
-                        prim_parts.append(f"скидка с {old_disc_in_base} на {old_disc_manual}")
-                    if min_price_changed:
-                        prim_parts.append(f"минимальная цена с {min_price_base} на {min_price_new}")
-
-                    prim = "Изменены: " + " и ".join(prim_parts)
-                    updated_df.at[_, columns_dict['prim_col']] = prim
-                    change_info[columns_dict['prim_col']] = prim
+                    logger.info("invalid_value",
+                                message=error_message,
+                                importance="high",
+                                id=row[columns_dict['id_col']],
+                                product_id=row[columns_dict['product_id_col']],
+                                error=str(e),
+                                marketplace=marketplace,
+                                username=username)
 
                     c.execute(
-                        f"INSERT INTO '{price_change_log_table}' (timestamp, id, product_id, old_price, new_price, old_discount, new_discount, old_min_price, new_min_price, prim, change_applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                         row[columns_dict['id_col']],
-                         row[columns_dict['product_id_col']],
-                         old_price if price_changed else None,
-                         new_price if price_changed else None,
-                         old_disc_in_base if discount_changed else None,
-                         old_disc_manual if discount_changed else None,
-                         min_price_base if min_price_changed else None,
-                         min_price_new if min_price_changed else None,
-                         prim, 1))
+                        f"INSERT INTO '{price_change_log_table}' VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        create_log_entry(timestamp, row, prim=error_message)
+                    )
 
-                    change_info['change_applied'] = True
-                    changes.append(change_info)
+            conn.commit()
 
-            except ValueError:
-                logger.info("invalid_value",
-                             message="Некорректный формат данных",
-                             importance="high",
-                             id=row[columns_dict['id_col']],
-                             product_id=row[columns_dict['product_id_col']],
-                             marketplace=marketplace,
-                             username=username)
-                c.execute(
-                    f"INSERT INTO '{price_change_log_table}' (timestamp, id, product_id, old_price, new_price, old_discount, new_discount, old_min_price, new_min_price, prim, change_applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                     row[columns_dict['id_col']],
-                     row[columns_dict['product_id_col']],
-                     None, None, None, None, None, None,
-                     "Ошибка формата данных", 0))
-
-        conn.commit()
     except sqlite3.Error as e:
         logger.error("database_error",
-                    message="Ошибка базы данных",
-                    importance="high",
-                    error=str(e),
-                    marketplace=marketplace,
-                    username=username)
+                     message="Ошибка базы данных",
+                     importance="high",
+                     error=str(e),
+                     marketplace=marketplace,
+                     username=username)
         return None, None
 
-    conn.close()
-
-    price_changed_df = pd.DataFrame(changes)
+    price_changed_df = pd.DataFrame(changes) if changes else None
     return updated_df, price_changed_df
 
 

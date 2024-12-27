@@ -25,7 +25,7 @@ async def update_dataframe_wb(df1: pd.DataFrame, df2: pd.DataFrame, user_name: s
         df2_updated = df2.iloc[1:].copy()
 
         # Определяем колонки
-        required_cols = ['price', 'disc_old', 'id', 'link']
+        required_cols = ['nmID','price', 'disc_old', 'id', 'link']
         optional_cols = ['Client-Id','t_price', 'discount']
 
         # Проверяем наличие обязательных колонок
@@ -74,6 +74,8 @@ async def update_dataframe_wb(df1: pd.DataFrame, df2: pd.DataFrame, user_name: s
                         pd.isna(row[col])
                         or row[col] == ''
                         or row[col] == 'Нет значения'
+                        or row[col] == 'Нет Значения'
+                        or row[col] == '0'
                     )
                     else row[col],
                     axis=1
@@ -128,7 +130,7 @@ async def write_csv_async(df: pd.DataFrame, filename: str) -> None:
 
 async def update_stocks_data(old_df: pd.DataFrame, new_df: pd.DataFrame, logger) -> pd.DataFrame:
     """
-    Асинхронно обновляет данные о стоках из колонки quantityFull
+    Асинхронно обновляет данные о стоках из колонки quantity с суммированием остатков по складам
     """
     try:
         logger.info(
@@ -138,9 +140,9 @@ async def update_stocks_data(old_df: pd.DataFrame, new_df: pd.DataFrame, logger)
         )
 
         # Проверяем наличие нужной колонки
-        if 'quantityFull' not in new_df.columns:
-            logger.error("Колонка quantityFull не найдена во втором датафрейме")
-            raise ValueError("Колонка quantityFull не найдена")
+        if 'quantity' not in new_df.columns:
+            logger.error("Колонка quantity не найдена во втором датафрейме")
+            raise ValueError("Колонка quantity не найдена")
 
             # Сохраняем первую строку с описаниями
         descriptions = old_df.iloc[0:1].copy()
@@ -152,8 +154,11 @@ async def update_stocks_data(old_df: pd.DataFrame, new_df: pd.DataFrame, logger)
         old_df_without_desc['nmID'] = pd.to_numeric(old_df_without_desc['nmID'], errors='coerce')
         new_df['nmId'] = pd.to_numeric(new_df['nmId'], errors='coerce')
 
-        # Создаем маппинг nmId -> quantityFull из нового датафрейма
-        stocks_mapping = dict(zip(new_df['nmId'], new_df['quantityFull']))
+        # Группируем новый датафрейм по nmId и суммируем quantity
+        stocks_by_nmid = new_df.groupby('nmId')['quantity'].sum()
+
+        # Создаем маппинг nmId -> суммарный quantity
+        stocks_mapping = stocks_by_nmid.to_dict()
 
         # Выводим пример маппинга для проверки
         logger.info(
@@ -186,6 +191,7 @@ async def update_stocks_data(old_df: pd.DataFrame, new_df: pd.DataFrame, logger)
             обновлено_строк=updated_count,
             не_обновлено_строк=not_updated_count
         )
+
         if 'image' not in final_df.columns:
             # Создаем колонку image и заполняем первую строку
             final_df['image'] = ''

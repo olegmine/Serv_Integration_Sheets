@@ -88,7 +88,6 @@ def process_dataframe(df, market_name=None, username=None):
         'Текущая цена с учетом скидки, ₽': 'price',
         'Цена до скидки (перечеркнутая цена), ₽': 'price_old',
         'Наименование товара': 'id',
-        'Доступно к продаже по схеме FBS, шт.': 'stock',
         'Рыночная цена, ₽': 'market_price',
         'Рейтинг': 'rating'
     }
@@ -142,7 +141,6 @@ def process_dataframe(df, market_name=None, username=None):
         new_df['id'] = df['Наименование товара']
         new_df['link'] = 'https://www.ozon.ru/product/' + df['SKU'].fillna('').astype(str)
         new_df['status'] = df['Статус товара']
-        new_df['stock'] = safe_float_convert(df['Доступно к продаже по схеме FBS, шт.'], default_value=0)
         new_df['rating'] = safe_float_convert(df['Рейтинг'], default_value=0)
 
         # Ценовые поля
@@ -174,7 +172,6 @@ def process_dataframe(df, market_name=None, username=None):
             't_price': 'Цена для применения',
             'old_price': 'Перечеркнутая цена для применения',
             'min_price': 'Минимальная цена для участия в акциях',
-            'stock': 'Доступно к продаже (FBS)',
             'rating': 'Рейтинг товара',
             'Flag': 'Тумблер применения цены Указать (True/TRUE/+) для обработки строки',
             'prim': 'Примечание'
@@ -580,7 +577,7 @@ def sync_update_dataframe_ozon(df1: pd.DataFrame, df2: pd.DataFrame, user_name: 
     df2_updated = df2.iloc[1:].copy()
 
     # Определяем колонки
-    required_cols = ['product_id', 'offer_id', 'id', 'link', 'status', 'stock', 'rating', 'market_price', 'price', 'price_old', 'min_price_old']
+    required_cols = ['product_id', 'offer_id', 'id', 'link', 'status','stock_fbs','stock_fbo', 'rating', 'market_price', 'price', 'price_old', 'min_price_old']
     optional_cols = ['Client-Id', 't_price', 'old_price', 'min_price','Flag']
 
     # Проверяем наличие обязательных колонок
@@ -661,28 +658,28 @@ def sync_update_dataframe_ozon(df1: pd.DataFrame, df2: pd.DataFrame, user_name: 
     return final_df
 
 # Пример использования
-# if __name__ == "__main__":
-#     async def example():
-#         # try:
-#             # df = await get_products_report(
-#             #     client_id="1336645",
-#             #     api_key="test",
-#             #     marketname="ozon",
-#             #     username="test_user",
-#             #     # language="RU"
-#             # )
-#             # df_fin = await sort_by_status_async(df)
-#             # df_fin.to_csv('sell.csv')
-#         #     print(f"Получен DataFrame размером: {df.shape}")
-#         #     print("\nПервые несколько строк:")
-#         #     print(df.head())
-#         #     print("\nСтолбцы DataFrame:")
-#         #     print(df.columns.tolist())
-#         # except Exception as e:
-#         #     print(f"Ошибка: {e}")
-#
-#
-#     asyncio.run(example())
+if __name__ == "__main__":
+    async def example():
+        try:
+            df = await get_products_report(
+                client_id="1921962",
+                api_key="95cb9589-6502-4a8a-827f-9798226a279d",
+                marketname="ozon",
+                username="test_user",
+                # language="RU"
+            )
+            df_fin = await sort_by_status_async(df)
+            df_fin.to_csv('sell.csv')
+            print(f"Получен DataFrame размером: {df.shape}")
+            print("\nПервые несколько строк:")
+            print(df.head())
+            print("\nСтолбцы DataFrame:")
+            print(df.columns.tolist())
+        except Exception as e:
+            print(f"Ошибка: {e}")
+
+
+    asyncio.run(example())
 
 
 # df_sheet = pd.read_csv('sheet_Ozon_Tech_PC_Components.csv')

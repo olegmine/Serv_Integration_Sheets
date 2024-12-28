@@ -14,7 +14,8 @@ from scr.logger import logger
 from scr.data_fetcher import get_sheet_data, save_to_database
 from scr.data_updater import update_prices ,update_and_merge_dataframes
 from scr.data_writer import write_sheet_data
-from scr.get_data.get_ozon_data.get_ozon_data import get_products_report,update_dataframe_ozon,sort_by_status_async
+from scr.get_data.get_ozon_data.get_ozon_data import update_dataframe_ozon,sort_by_status_async
+from scr.get_data.get_ozon_data.ozon_f_data import from_ozon
 import pandas as pd
 import warnings
 from scr.get_data.get_wb_data.get_first_wb_datas import get_wb_data
@@ -136,11 +137,11 @@ async def process_ozon_data(session: aiohttp.ClientSession, config: MarketplaceC
         report_df = pd.DataFrame()
         try:
             ozon_logger.info(f'Запрос данных из Ozon для пользователя {config.user_id}')
-            report_df = await get_products_report(
+            report_df = await from_ozon(
                 client_id=db_config['client_id'],
                 api_key=db_config['api_key'],
-                marketname=config.market_name,
-                username=config.user_id,
+                market_name=config.market_name,
+                user_id=config.user_id,
             )
         except Exception as e:
             ozon_logger.error(
